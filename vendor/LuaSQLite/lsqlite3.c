@@ -28,6 +28,9 @@
 
 #include <stdlib.h>
 #include <string.h>
+// [lubyk]
+#include <stdio.h>
+// [/lubyk]
 #include <assert.h>
 
 #define LUA_LIB
@@ -819,6 +822,171 @@ static int db_isopen(lua_State *L) {
     lua_pushboolean(L, db->db != NULL ? 1 : 0);
     return 1;
 }
+
+// [lubyk]
+/** Return a Lua string representing a binary blob with the database content.
+ */
+static int db_backup(lua_State *L) {
+  int ok = 1;
+  sdb *s_db = lsqlite_getdb(L, 1);
+  sqlite3 *db = s_db->db;
+
+  // 1. Create a temporary file to hold the backup.
+  char *temp = tmpnam(NULL);
+  FILE *file;
+  // 2. Create database with the temp file.
+  sqlite3 *temp_db;
+  if (sqlite3_open(temp, &temp_db) != SQLITE_OK) {
+    if (temp_db) {
+      lua_pushfstring(L, "Could not create temp database (%s)", sqlite3_errmsg(temp_db));
+      sqlite3_close(temp_db);
+    }
+    ok = 0;
+  } else {
+    // 3. Prepare for backup.
+    sqlite3_backup * backup = sqlite3_backup_init(
+        // destination
+        temp_db,
+        // destination database name
+        "main",
+        // source
+        db,
+        // source database name
+        "main"
+        );
+
+    // 4. Backup.
+    int status = sqlite3_backup_step(backup, -1);
+    if (status != SQLITE_DONE) {
+      // Bad
+      lua_pushstring(L, "Could not complete sqlite3 backup.");
+      ok = 0;
+    }
+    // 5. Finish.
+    sqlite3_backup_finish(backup);
+    // 6. Close temp database.
+    sqlite3_close(temp_db);
+  }
+
+  if (ok) {
+    // 7. Copy temp file to string.
+    unsigned long len;
+
+    file = fopen(temp, "rb");
+    if (!file) {
+      lua_pushstring(L, "Unable to read temp file");
+      ok = 0;
+    } else {
+
+      // move to end of file
+      fseek(file, 0, SEEK_END);
+      // get length
+      len = ftell(file);
+      // move back to start of file
+      fseek(file, 0, SEEK_SET);
+
+      char * buffer = (char*)malloc(len+1);
+      if (!buffer) {
+        lua_pushstring(L, "Unable to allocate memory for backup");
+        fclose(file);
+        ok = 0;
+      } else {
+        // read all into buffer
+        fread(buffer, len, 1, file);
+        fclose(file);
+
+        // push data into Lua
+        lua_pushlstring(L, buffer, len);
+
+        free(buffer);
+      }
+    }
+  }
+
+  // 8. Cleanup
+  if (file) remove(temp);
+
+  if (ok) {
+    return 1;
+  } else {
+    lua_error(L);
+    return 0; // never reached
+  }
+}
+
+/** Restore the database from a binary blob in a Lua string.
+ */
+static int db_restore(lua_State *L) {
+  int ok = 1;
+  sdb *s_db = lsqlite_getdb(L, 1);
+  sqlite3 *db = s_db->db;
+  sqlite3 *temp_db;
+  size_t len;
+  const char *text = luaL_checklstring(L, 2, &len);
+
+  // 1. Create a temporary file to hold the restore.
+  char *temp = tmpnam(NULL);
+  // 2. Write string to temp file.
+  FILE *file = fopen(temp, "wb");
+  if (!file) {
+    lua_pushstring(L, "Unable to create temp file.");
+    ok = 0;
+  }
+  
+  if (ok) {
+    // write string to temp file
+    fwrite(text, len, 1, file);
+    fclose(file);
+
+    // 3. Create database with the temp file.
+    if (sqlite3_open(temp, &temp_db) != SQLITE_OK) {
+      if (temp_db) {
+        lua_pushfstring(L, "Could not create temp database (%s)", sqlite3_errmsg(temp_db));
+        sqlite3_close(temp_db);
+      }
+      ok = 0;
+    }
+  }
+
+  if (ok) {
+    // 3. Prepare for backup.
+    sqlite3_backup * backup = sqlite3_backup_init(
+        // destination
+        db,
+        // destination database name
+        "main",
+        // source
+        temp_db,
+        // source database name
+        "main"
+        );
+
+    // 4. Backup.
+    int status = sqlite3_backup_step(backup, -1);
+    if (status != SQLITE_DONE) {
+      // Bad
+      lua_pushstring(L, "Could not complete sqlite3 backup.");
+      ok = 0;
+    }
+
+    // 5. Finish.
+    sqlite3_backup_finish(backup);
+    // 6. Close temp database.
+    sqlite3_close(temp_db);
+  }
+
+  // 8. Cleanup
+  if (file) remove(temp);
+
+  if (ok) {
+    return 1;
+  } else {
+    lua_error(L);
+    return 0; // never reached
+  }
+}
+
+// [/lubyk]
 
 static int db_last_insert_rowid(lua_State *L) {
     sdb *db = lsqlite_checkdb(L, 1);
@@ -1764,6 +1932,11 @@ static const luaL_reg dblib[] = {
     {"execute",             db_exec                 },
     {"close",               db_close                },
     {"close_vm",            db_close_vm             },
+
+    // [lubyk]
+    {"backup",              db_backup               },
+    {"restore",             db_restore              },
+    // [/lubyk]
 
     {"__tostring",          db_tostring             },
     {"__gc",                db_gc                   },

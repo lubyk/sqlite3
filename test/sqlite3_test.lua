@@ -11,21 +11,20 @@ require 'lubyk'
 
 local should = test.Suite('sqlite3')
 
-function should.setup(t)
+local function mockDb(no_fill)
   local db = sqlite3.open_memory()
 
-  db:exec[[
-    CREATE TABLE test (id INTEGER PRIMARY KEY, content);
+  db:exec 'CREATE TABLE test (id INTEGER PRIMARY KEY, content);'
 
-    INSERT INTO test VALUES (NULL, 'Hello World');
-    INSERT INTO test VALUES (NULL, 'Hello Lua');
-    INSERT INTO test VALUES (NULL, 'Hello SQLite3')
-  ]]
-  t.db =db
-end
+  if not no_fill then
+    db:exec[[
+      INSERT INTO test VALUES (NULL, 'Hello World');
+      INSERT INTO test VALUES (NULL, 'Hello Lua');
+      INSERT INTO test VALUES (NULL, 'Hello SQLite3')
+    ]]
+  end
 
-function should.teardown(t)
-  t.db = nil
+  return db
 end
 
 function should.open(t)
@@ -65,7 +64,7 @@ function should.prepareInsert(t)
 end
 
 function should.prepareSelect(t)
-  local db = t.db
+  local db = mockDb()
   local stmt = db:prepare[[ SELECT content FROM test WHERE id = :id ]]
   stmt:bind_names{id = 2}
   assertEqual('Hello Lua', stmt:first_row()[1])
@@ -73,10 +72,23 @@ function should.prepareSelect(t)
 end
 
 function should.delete(t)
-  local db = t.db
+  local db = mockDb()
   db:exec 'DELETE from test;'
   local stmt = db:prepare[[ SELECT COUNT(*) FROM test ]]
   assertEqual(0, stmt:first_row()[1])
+end
+
+function should.backupRestore(t)
+  local db = mockDb()
+  local s = db:backup()
+  assertType('string', s)
+  local db2 = mockDb(true)   
+  local stmt = db2:prepare[[ SELECT content FROM test WHERE id = :id ]]
+  stmt:bind_names{id = 2}
+  assertEqual(nil, stmt:first_row())
+
+  db2:restore(s)
+  assertEqual('Hello Lua', stmt:first_row()[1])   
 end
 
 test.all()
